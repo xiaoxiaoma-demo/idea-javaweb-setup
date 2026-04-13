@@ -20,7 +20,7 @@ Use this skill when the user wants Codex to auto-configure IntelliJ IDEA project
 
 Before writing files, confirm with user in chat:
 1. Target project path(s)
-2. Target project name(s)
+2. Target project name(s), if the user wants to override auto-detected names
 
 Script execution must require terminal input `Y` to continue by default.
 For multi-project setup, confirm once and execute all.
@@ -28,19 +28,24 @@ For multi-project setup, confirm once and execute all.
 ## Execution workflow
 
 1. Resolve target project path and project name(s).
-   - Must confirm exact project directory, not workspace root.
+   - Preferred: user gives exact project directory.
    - If user gives workspace root and `<root>/<project-name>` matches JavaWeb layout (`src` + `WebRoot/web`), script auto-corrects to that child path.
+   - If user gives workspace root and there is exactly one child directory matching JavaWeb layout (`src` + `WebRoot/web`), script auto-detects that child even when project name is omitted.
+   - If user omits `ProjectName`, script auto-detects it in this order:
+     1. existing `.idea/modules.xml` referenced module name
+     2. the only `*.iml` file in project root
+     3. project directory name as final fallback
 2. Confirm with user in chat.
 3. Run (single project):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "C:/Users/mamama/.codex/skills/idea-javaweb-setup/scripts/configure_idea_javaweb.ps1" -ProjectPath "<project-path>" -ProjectName "<project-name>"
+powershell -ExecutionPolicy Bypass -File "C:/Users/mamama/.codex/skills/idea-javaweb-setup/scripts/configure_idea_javaweb.ps1" -ProjectPath "<project-path>" [-ProjectName "<project-name>"]
 ```
 
 4. Run (batch two projects, one `Y` confirmation):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "C:/Users/mamama/.codex/skills/idea-javaweb-setup/scripts/configure_idea_javaweb.ps1" -ProjectPath "<path-1>,<path-2>" -ProjectName "<name-1>,<name-2>"
+powershell -ExecutionPolicy Bypass -File "C:/Users/mamama/.codex/skills/idea-javaweb-setup/scripts/configure_idea_javaweb.ps1" -ProjectPath "<path-1>,<path-2>" [-ProjectName "<name-1>,<name-2>"]
 ```
 
 5. Report changed files and key runtime values (HTTP port, JNDI port, context path, tomcat name).

@@ -28,6 +28,13 @@ function Get-WorkflowUrlFromYaml([string]$YamlPath) {
     return $line.Matches[0].Groups[1].Value.Trim()
 }
 
+function Test-JavaWebProjectLayout([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or !(Test-Path $Path)) { return $false }
+    $hasSrc = Test-Path (Join-Path $Path 'src')
+    $hasWebRoot = (Test-Path (Join-Path $Path 'WebRoot')) -or (Test-Path (Join-Path $Path 'web'))
+    return ($hasSrc -and $hasWebRoot)
+}
+
 function Find-WorkflowUrl([string]$ProjectPath, [string]$ProjectName, [string]$GivenWorkflowUrl) {
     if ($GivenWorkflowUrl) { return $GivenWorkflowUrl }
 
@@ -51,20 +58,98 @@ function Find-WorkflowUrl([string]$ProjectPath, [string]$ProjectName, [string]$G
 
 function Resolve-ProjectPath([string]$PathIn, [string]$ProjectName) {
     $resolved = (Resolve-Path $PathIn).Path
-    $hasSrc = Test-Path (Join-Path $resolved 'src')
-    $hasWebRoot = (Test-Path (Join-Path $resolved 'WebRoot')) -or (Test-Path (Join-Path $resolved 'web'))
-    if ($hasSrc -and $hasWebRoot) { return $resolved }
+    if (Test-JavaWebProjectLayout -Path $resolved) { return $resolved }
 
     if ($ProjectName) {
         $candidate = Join-Path $resolved $ProjectName
-        $candSrc = Test-Path (Join-Path $candidate 'src')
-        $candWeb = (Test-Path (Join-Path $candidate 'WebRoot')) -or (Test-Path (Join-Path $candidate 'web'))
-        if ($candSrc -and $candWeb) {
+        if (Test-JavaWebProjectLayout -Path $candidate) {
             Write-Warning "ProjectPath appears to be workspace root. Auto-corrected to: $candidate"
             return (Resolve-Path $candidate).Path
         }
     }
+
+    $childProjects = @(Get-ChildItem -Path $resolved -Directory -ErrorAction SilentlyContinue | Where-Object {
+        Test-JavaWebProjectLayout -Path $_.FullName
+    })
+    if ($childProjects.Count -eq 1) {
+        Write-Warning "ProjectPath appears to be workspace root. Auto-detected child project: $($childProjects[0].FullName)"
+        return $childProjects[0].FullName
+    }
+
     return $resolved
+}
+
+function Get-RelativePath([string]$BasePath, [string]$TargetPath) {
+    $baseFullPath = [System.IO.Path]::GetFullPath($BasePath).TrimEnd('\')
+    $targetFullPath = [System.IO.Path]::GetFullPath($TargetPath)
+    $baseUri = [uri]($baseFullPath + '\')
+    $targetUri = [uri]$targetFullPath
+    $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+    return [uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', '\')
+}
+
+function Resolve-ModuleDefinition([string]$ProjectPath, [string]$ExplicitProjectName) {
+    $ideaDir = Join-Path $ProjectPath '.idea'
+    $modulesXmlPath = Join-Path $ideaDir 'modules.xml'
+    $existingImlPath = $null
+    $resolvedImlPath = $null
+    $resolvedName = $null
+
+    if (Test-Path $modulesXmlPath) {
+        try {
+            [xml]$modulesDoc = Get-Content $modulesXmlPath
+            $moduleNodes = @($modulesDoc.SelectNodes('/project/component[@name="ProjectModuleManager"]/modules/module'))
+            foreach ($moduleNode in $moduleNodes) {
+                $rawPath = $moduleNode.filepath
+                if ([string]::IsNullOrWhiteSpace($rawPath)) {
+                    $rawPath = $moduleNode.fileurl -replace '^file://', ''
+                }
+                if ([string]::IsNullOrWhiteSpace($rawPath)) { continue }
+
+                $candidateRelative = $rawPath.Replace('$PROJECT_DIR$', '').TrimStart('/','\').Replace('/', '\')
+                $candidatePath = Join-Path $ProjectPath $candidateRelative
+                if (Test-Path $candidatePath) {
+                    $existingImlPath = (Resolve-Path $candidatePath).Path
+                    break
+                }
+            }
+        } catch {
+            Write-Warning "Failed to parse existing modules.xml: $modulesXmlPath"
+        }
+    }
+
+    if ($ExplicitProjectName) {
+        if ($existingImlPath -and [System.IO.Path]::GetFileNameWithoutExtension($existingImlPath) -ieq $ExplicitProjectName) {
+            $resolvedImlPath = $existingImlPath
+        } else {
+            $explicitImlPath = Join-Path $ProjectPath "$ExplicitProjectName.iml"
+            if ($existingImlPath) {
+                $explicitImlPath = Join-Path (Split-Path -Path $existingImlPath -Parent) "$ExplicitProjectName.iml"
+            }
+            $resolvedImlPath = $explicitImlPath
+        }
+        $resolvedName = $ExplicitProjectName
+    } elseif ($existingImlPath) {
+        $resolvedImlPath = $existingImlPath
+        $resolvedName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedImlPath)
+    } else {
+        $rootImlFiles = @(Get-ChildItem -Path $ProjectPath -Filter '*.iml' -File -ErrorAction SilentlyContinue)
+        if ($rootImlFiles.Count -eq 1) {
+            $resolvedImlPath = $rootImlFiles[0].FullName
+            $resolvedName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedImlPath)
+        }
+    }
+
+    if (-not $resolvedImlPath) {
+        $resolvedName = Split-Path -Path $ProjectPath -Leaf
+        $resolvedImlPath = Join-Path $ProjectPath "$resolvedName.iml"
+    }
+
+    return [pscustomobject]@{
+        ProjectName = $resolvedName
+        ModuleImlPath = $resolvedImlPath
+        ModuleImlRelativePath = Get-RelativePath -BasePath $ProjectPath -TargetPath $resolvedImlPath
+    }
 }
 
 function Split-ListArg([string]$Value) {
@@ -180,11 +265,7 @@ function Upsert-WorkspaceComponents(
         [xml]$doc = "<?xml version='1.0' encoding='UTF-8'?><project version='4'></project>"
     }
 
-    $components = @()
-    if ($doc.project -and $doc.project.component) {
-        $components = @($doc.project.component)
-    }
-
+    $components = @($doc.SelectNodes('/project/component'))
     $toRemove = @()
     foreach ($c in $components) {
         if ($c.name -eq 'RunManager' -or $c.name -eq 'ArtifactsWorkspaceSettings') {
@@ -278,11 +359,15 @@ for ($i = 0; $i -lt $projectPathList.Count; $i++) {
     elseif ($projectNameList.Count -gt 1) { $name = $projectNameList[$i] }
 
     $resolvedPath = Resolve-ProjectPath -PathIn $projectPathList[$i] -ProjectName $name
-    $folderName = Split-Path -Path $resolvedPath -Leaf
-    if (-not $name) { $name = $folderName }
+    if (-not (Test-JavaWebProjectLayout -Path $resolvedPath)) {
+        throw "Resolved path is not a Java Web project layout (missing src and WebRoot/web): $resolvedPath"
+    }
+    $moduleDefinition = Resolve-ModuleDefinition -ProjectPath $resolvedPath -ExplicitProjectName $name
     $targets += [pscustomobject]@{
         ProjectPath = $resolvedPath
-        ProjectName = $name
+        ProjectName = $moduleDefinition.ProjectName
+        ModuleImlPath = $moduleDefinition.ModuleImlPath
+        ModuleImlRelativePath = $moduleDefinition.ModuleImlRelativePath
     }
 }
 
@@ -293,6 +378,7 @@ if (-not $SkipConfirm) {
     foreach ($t in $targets) {
         Write-Host "[$idx] ProjectPath : $($t.ProjectPath)"
         Write-Host "    ProjectName : $($t.ProjectName)"
+        Write-Host "    ModuleIml   : $($t.ModuleImlRelativePath)"
         $idx++
     }
     Write-Host "TomcatName  : $TomcatName"
@@ -307,6 +393,8 @@ $allChanged = New-Object System.Collections.Generic.List[string]
 foreach ($t in $targets) {
     $projectPath = $t.ProjectPath
     $projectName = $t.ProjectName
+    $moduleImlPath = $t.ModuleImlPath
+    $moduleImlRelativePath = $t.ModuleImlRelativePath
 
     $ideaDir = Join-Path $projectPath '.idea'
     $artifactsDir = Join-Path $ideaDir 'artifacts'
@@ -315,7 +403,6 @@ foreach ($t in $targets) {
     Ensure-Dir $artifactsDir
     Ensure-Dir $librariesDir
 
-    $moduleImlPath = Join-Path $projectPath "$projectName.iml"
     $webRootDirName = if (Test-Path (Join-Path $projectPath 'WebRoot')) { 'WebRoot' } elseif (Test-Path (Join-Path $projectPath 'web')) { 'web' } else { 'WebRoot' }
     $libraryRootDirName = if (Test-Path (Join-Path $projectPath 'WebRoot/WEB-INF/lib')) { 'WebRoot' } else { $webRootDirName }
     $webXmlPath = "file://`$MODULE_DIR`$/$webRootDirName/WEB-INF/web.xml"
@@ -366,7 +453,7 @@ foreach ($t in $targets) {
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://`$PROJECT_DIR`$/$projectName.iml" filepath="`$PROJECT_DIR`$/$projectName.iml" />
+      <module fileurl="file://`$PROJECT_DIR`$/$($moduleImlRelativePath.Replace('\', '/'))" filepath="`$PROJECT_DIR`$/$($moduleImlRelativePath.Replace('\', '/'))" />
     </modules>
   </component>
 </project>
