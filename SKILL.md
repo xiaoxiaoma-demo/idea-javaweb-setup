@@ -61,7 +61,9 @@ powershell -ExecutionPolicy Bypass -File "C:/Users/mamama/.codex/skills/idea-jav
   - if occupied, increment (`1100`, `1101`, ...)
 - In Tomcat Local server-settings, keep HTTP_PORT and JNDI_PORT as sibling options.
 - Do not write OPEN_IN_BROWSER_URL in run configuration.
-- For `jszgbm`, keep deployment `CONTEXT_PATH` empty (`value=""`) unless explicitly overridden by script parameter.
+- Do not use project-name allowlists to decide root deployment context.
+- If local `resources/application.yml` contains URLs on the target Tomcat HTTP port whose first path segment is not the project name, infer root deployment context (`CONTEXT_PATH value=""`).
+- Keep `-ContextPath` as an explicit override, including empty string for root context.
 - SKILL.md must be saved as UTF-8 without BOM, and the first byte of file must start with --- frontmatter delimiter.
 - Keep `BASE_DIRECTORY_NAME` in `server-settings` (reuse existing value when present).
 - If wrong parent path was configured previously, cleanup should be explicit and user-confirmed.

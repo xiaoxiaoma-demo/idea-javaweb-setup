@@ -6,6 +6,7 @@
     [string]$JdkName = "1.8",
     [int]$HttpPort = 8080,
     [int]$BaseJndiPort = 1099,
+    [AllowEmptyString()]
     [string]$ContextPath,
     [string]$WorkflowUrl,
     [switch]$UseWorkflowUrlRule = $true,
@@ -54,6 +55,37 @@ function Find-WorkflowUrl([string]$ProjectPath, [string]$ProjectName, [string]$G
         if ($u -and $u -match "/$ProjectName/?$") { return $u }
     }
     return $null
+}
+
+function Test-RootContextFromProjectUrls([string]$ProjectPath, [string]$ProjectName, [int]$HttpPort) {
+    $yamlPath = Join-Path $ProjectPath 'resources/application.yml'
+    if (!(Test-Path $yamlPath)) { return $false }
+
+    $urlLines = Select-String -Path $yamlPath -Pattern 'https?://[^\s''"]+' -AllMatches -ErrorAction SilentlyContinue
+    foreach ($line in $urlLines) {
+        if ($line.Line -match '^\s*workflow_url\s*:') { continue }
+
+        foreach ($match in $line.Matches) {
+            try {
+                $uri = [uri]$match.Value.TrimEnd(',', ';')
+                if ($uri.Port -ne $HttpPort) { continue }
+
+                $path = $uri.AbsolutePath.TrimEnd('/')
+                if ([string]::IsNullOrWhiteSpace($path) -or $path -eq '/') {
+                    return $true
+                }
+
+                $firstSegment = $path.Trim('/').Split('/')[0]
+                if ($firstSegment -and $firstSegment -ine $ProjectName) {
+                    return $true
+                }
+            } catch {
+                # Ignore malformed URL-like values in application.yml.
+            }
+        }
+    }
+
+    return $false
 }
 
 function Resolve-ProjectPath([string]$PathIn, [string]$ProjectName) {
@@ -409,8 +441,8 @@ foreach ($t in $targets) {
 
     $localHttpPort = $HttpPort
     $localContextPath = $ContextPath
-    if ([string]::IsNullOrWhiteSpace($localContextPath)) {
-        if ($projectName -ieq 'jszgbm') {
+    if (-not $PSBoundParameters.ContainsKey('ContextPath') -and [string]::IsNullOrWhiteSpace($localContextPath)) {
+        if (Test-RootContextFromProjectUrls -ProjectPath $projectPath -ProjectName $projectName -HttpPort $localHttpPort) {
             $localContextPath = ''
         } else {
             $localContextPath = "/$projectName"
